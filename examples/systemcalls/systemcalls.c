@@ -119,6 +119,7 @@ bool do_exec(int count, ...) {
 //Reference used: https://stackoverflow.com/questions/13784269/redirection-inside-call-to-execvp-not-working/13784315#13784315
 bool do_exec_redirect(const char *outputfile, int count, ...) {
     openlog(NULL, 0, LOG_USER);
+    syslog(LOG_INFO, "AESD: BEGIN LOG");
     int fd ;
     va_list args;
     va_start(args, count);
@@ -126,10 +127,11 @@ bool do_exec_redirect(const char *outputfile, int count, ...) {
     int i;
     for (i = 0; i < count; i++) {
         command[i] = va_arg(args, char *);
+        //syslog(LOG_INFO, "AESD: ARG %d is %s\n",i,command[i]);
     }
     command[count] = NULL;
 
-    va_end(args);
+
     char *path = command[0];
 
     //Ensure that the paths are not null or empty
@@ -166,15 +168,17 @@ bool do_exec_redirect(const char *outputfile, int count, ...) {
         }
         //Close the original fd
         close(fd);
-
+        syslog(LOG_INFO, "AESD: Command[0]: %s, Command[1]: %s\n", command[0], command[1]);
         // Execute the command and check if the process returns okay
-        if (execv(path, command) == -1) {
+        if (execv(command[0], command) == -1) {
             syslog(LOG_ERR, "AESD: Program failed to execute\n");
             exit(EXIT_FAILURE);
         }
 
+
       //  exit(EXIT_SUCCESS);
     } else {
+        close(fd);
         // Wait for the child process to complete
         int status;
         if (waitpid(child_pid,&status,0) == -1) {
@@ -188,12 +192,15 @@ bool do_exec_redirect(const char *outputfile, int count, ...) {
             if(exit_status != 0 ){
                 return false;
             }
+
         } else {
             printf("Child process did not exit normally\n");
             return false; // Command execution failed
         }
-        close(fd);
+
     }
+    va_end(args);
+    closelog();
     return true;
 
 
