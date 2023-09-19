@@ -2,6 +2,10 @@
 # Script outline to install and build kernel.
 # Author: Siddhant Jajoo.
 
+#A Script to cross compile linux
+#Author: Daniel Mendez
+#Course : ECEN 5713: Advanced Embedded Software Development
+
 set -e
 set -u
 
@@ -60,7 +64,6 @@ fi
 
 #Create the required directories
 # List of directories to create
-#directories=("init" "shell" "daemons" "etc" "dev" "lib" "lib64" "bin" "proc" "sys" "sbin" "lib/modules/${KERNEL_VERSION}" "tmp" "usr/bin" "usr/sbin" "var/log")
 directories=("bin" "dev" "etc" "home" "conf" "lib" "lib64" "proc" "sbin" "sys" "lib/modules/${KERNEL_VERSION}" "tmp" "usr/bin" "usr/sbin" "var/log")
 
 # Loop through the directories and create them if they don't exist
@@ -71,7 +74,7 @@ for dir in "${directories[@]}"; do
 done
 
 
-
+# COnfigure and compiliation of busybox
 cd "$OUTDIR"
 if [ ! -d "${OUTDIR}/busybox" ]
 then
@@ -88,20 +91,21 @@ make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE}
 make CONFIG_PREFIX="${OUTDIR}/rootfs" ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
 
 
-
+# Copy library dependencies required for busybox (Thanks Aamir)
 echo "Library dependencies"
 
 
 SYSROOT=`aarch64-none-linux-gnu-gcc -print-sysroot`
 echo "SYSROOT IS ${SYSROOT}"
 
-#Copy the interpreter
+
 cd "$OUTDIR/rootfs"
 
 
 #${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 #${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
+#Copy the interpreter
 sudo cp "${SYSROOT}/lib/ld-linux-aarch64.so.1" lib
 
 #Copy the shared libraries
@@ -109,7 +113,7 @@ sudo cp "${SYSROOT}/lib64/libm.so.6" lib64
 sudo cp "${SYSROOT}/lib64/libresolv.so.2" lib64
 sudo cp "${SYSROOT}/lib64/libc.so.6" lib64
 
-#Make the device Noes
+#Make the device Nodes
 
 sudo mknod -m 666 dev/null c 1 3
 sudo mknod -m 600 dev/console c 5 1
@@ -129,9 +133,9 @@ cp "./autorun-qemu.sh" "$OUTDIR/rootfs/home"
 
 #Chown the root directory
 cd "$OUTDIR/rootfs"
-
 sudo chown -R root:root ./*
 
+#Create the .cpio file and zip it
 find . | cpio -H newc -ov --owner root:root > ../initramfs.cpio
 gzip -f "${OUTDIR}/initramfs.cpio"
 cd "$OUTDIR"
