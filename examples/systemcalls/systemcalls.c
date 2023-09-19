@@ -1,3 +1,11 @@
+/****************************************************************************
+ *  Author:     Daniel Mendez
+ *  Course:     ECEN 5713
+ *  Project:    Assignment_3 Part 1
+ *
+ ****************************************************************************/
+
+
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
@@ -7,6 +15,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include "systemcalls.h"
+
 
 /**
  * @param cmd the command to execute with system()
@@ -52,7 +61,8 @@ bool do_exec(int count, ...) {
     char *command[count + 1];
     int i;
     for (i = 0; i < count; i++) {
-        command[i] = va_arg(args, char *);
+        command[i] = va_arg(args,
+        char *);
 
     }
     command[count] = NULL;
@@ -125,80 +135,74 @@ bool do_exec_redirect(const char *outputfile, int count, ...) {
     char *command[count + 1];
     int i;
     for (i = 0; i < count; i++) {
-        command[i] = va_arg(args, char *);
-        //syslog(LOG_INFO, "AESD: ARG %d is %s\n",i,command[i]);
+        command[i] = va_arg(args,
+        char *);
     }
     command[count] = NULL;
 
 
-    // char *path = command[0];
+    char *path = command[0];
 
-//    //Ensure that the paths are not null or empty
-//    if (path == NULL || strlen(path) == 0 || outputfile == NULL || strlen(outputfile) == 0) {
-//        syslog(LOG_ERR, "AESD: Paths are empty or NULL\n");
-//        return false;
-//    }
-//
-//    //Check if the paths are valid - Modified based on CHATGPT output
-//    struct stat buffer;
-//    if (stat(path, &buffer) != 0 || stat(outputfile, &buffer) != 0) {
-//        syslog(LOG_ERR, "AESD: Path is invalid\n");
-//        return false;
-//    }
+    //Ensure that the paths are not null or empty
+    if (path == NULL || strlen(path) == 0 || outputfile == NULL || strlen(outputfile) == 0) {
+        syslog(LOG_ERR, "AESD: Paths are empty or NULL\n");
+        return false;
+    }
+
+    //Check if the paths are valid - Modified based on CHATGPT output
+    struct stat buffer;
+    if (stat(path, &buffer) != 0 || stat(outputfile, &buffer) != 0) {
+        syslog(LOG_ERR, "AESD: Path is invalid\n");
+        return false;
+    }
 
     //Check that the file was opened correctly
     fd = open(outputfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
     if (fd < 0) {
         syslog(LOG_ERR, "AESD: Failed to open redirection file \n");
-        exit(EXIT_FAILURE);
-      //  return false;
+        return false;
     }
     //Create new process
     pid_t child_pid = fork();
 
     if (child_pid == -1) {
         syslog(LOG_ERR, "AESD: Failed to fork a child process\n");
-        exit(EXIT_FAILURE);
-       // return false;
+        return false;
     } else if (child_pid == 0) {
 
         //Duplicate the file descriptor
         if (dup2(fd, 1) < 0) {
             syslog(LOG_ERR, "AESD: Failed to duplicate file descriptor\n");
             exit(EXIT_FAILURE);
-           // return false;
+            //return false;
         }
 
         syslog(LOG_INFO, "AESD: Command[0]: %s, Command[1]: %s\n", command[0], command[1]);
         // Execute the command and check if the process returns okay
-        if (execv(command[0], command) == -1) {
+        if (execv(path, command) == -1) {
             syslog(LOG_ERR, "AESD: Program failed to execute\n");
             exit(EXIT_FAILURE);
-            //exit(EXIT_FAILURE);
         }
 
         //Close the original fd
         close(fd);
-       // exit(EXIT_SUCCESS);
     } else {
         close(fd);
         // Wait for the child process to complete
         int status;
         if (waitpid(child_pid, &status, 0) == -1) {
             syslog(LOG_ERR, "AESD: Wait failed!\n");
-            exit(EXIT_FAILURE);
-           // return false;
+            return false;
         }
-
+        //Check the return status of the child process
         if (WIFEXITED(status)) {
             if (WEXITSTATUS(status) != 0) {
-                exit(EXIT_FAILURE);
-               // return false;
+                return false;
             }
 
         } else {
             exit(EXIT_FAILURE);
-            //return false; // Command execution failed
+            return false; // Command execution failed
         }
 
     }
