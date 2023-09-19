@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #A Script to search a directory for a string
 #Author: Daniel Mendez
 #Course : ECEN 5713: Advanced Embedded Software Development

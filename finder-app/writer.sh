@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #A Script to search a directory for a string
 #Author: Daniel Mendez
 #Course : ECEN 5713: Advanced Embedded Software Development
@@ -9,6 +9,7 @@ if [ $# -ne 2 ]; then
   echo "Script Exiting!"
   exit 1
 fi
+
 writefile=$1
 textstr=$2
 #Check to see if the first argument is a writefile
