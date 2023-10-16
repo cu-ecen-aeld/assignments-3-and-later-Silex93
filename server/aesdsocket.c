@@ -23,23 +23,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <syslog.h>
-#include <stdlib.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <stdbool.h>
-#include "queue.h"
+#include <time.h>
 #include <pthread.h>
-
+#include "queue.h"
 
 #define PORT "9000"
 #define BUFFER_SIZE 1024
@@ -65,8 +62,30 @@ typedef struct thread_node {
     SLIST_ENTRY(thread_node) entries;
 } thread_node_t;
 
+SLIST_HEAD(threadList, thread_node) threadListHead = SLIST_HEAD_INITIALIZER(threadListHead);
 
 static void signal_handler(int signo) {
+    //Free the linked list
+
+    thread_node_t *currentElement, *tempElement;
+    SLIST_FOREACH_SAFE(currentElement, &threadListHead, entries, tempElement) {
+        //Remove the output file
+        char temp_file[256];
+        snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", currentElement->thread_params->thread_num);
+        if (remove(temp_file) == 0) {
+            printf("File '%s' deleted successfully.\n", temp_file);
+        }
+
+        //Join all running threads
+        //IDK if this should be pthread_cancel or pthread_join
+        pthread_join(currentElement->thread_id,NULL);
+        // Remove the element safely from the list.
+        SLIST_REMOVE(&threadListHead, currentElement, thread_node, entries);
+        //Free the thread param data
+        free(currentElement->thread_params);
+        //Free the node itself
+        free(currentElement);
+    }
     //destroy the mutex
     pthread_mutex_destroy(&logFileMutex);
     //close the server socket
@@ -74,6 +93,36 @@ static void signal_handler(int signo) {
     printf("Signal Recieved %d \r\n", signo);
     syslog(LOG_DEBUG, "Caught signal, exiting");
     exit(EXIT_SUCCESS);
+}
+
+static void alarm_handler(int signo) {
+    printf("Alarm Recieved %d \r\n", signo);
+    char timestamp[64];
+    time_t currentTime;
+    struct tm *timeInfo;
+
+    //Get the current time
+    time(&currentTime);
+    timeInfo = localtime(&currentTime);
+    //Store the string formatted as RFC
+    strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %T %z\n", timeInfo);
+    //lock the mutex
+    pthread_mutex_lock(&logFileMutex);
+
+    //Then we open the main log file creating it if it doesn't exist
+    int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    //Write to the file
+    if (write(log_fd, timestamp, strlen(timestamp)) == -1) {
+        perror("Error writing to destination file");
+        close(log_fd);
+    }
+    //close the file
+    close(log_fd);
+    //Unlock the mutex
+    pthread_mutex_unlock(&logFileMutex);
+
+    //Schedule the next alarm
+    alarm(10);
 }
 
 // get sockaddr, IPv4 or IPv6:
@@ -142,7 +191,7 @@ void *thread_function(void *thread_param) {
     //Setup the temp file name
     char temp_file[256];
     snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", threadData->thread_num);
-    printf("Thread %d waiting on data!  \r\n",threadData->thread_num);
+    printf("Thread %d waiting on data!  \r\n", threadData->thread_num);
 
     //Waits for data
     while (1) {
@@ -188,9 +237,9 @@ void *thread_function(void *thread_param) {
                 ssize_t bytesRead;
                 //Else we close off this packet by dumping to our main file
                 //Here we first lock the mutex
-                //@TODO Lock Mutex
+
                 pthread_mutex_lock(threadData->log_file_mutex);
-                //Then we open the main file creating it if it doesnt exist
+                //Then we open the main file creating it if it doesn't exist
                 int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
                 //Keep copying over from temp file to main file
                 while ((bytesRead = read(temp_fd, temp_file_buffer, BUFFER_SIZE)) > 0) {
@@ -234,7 +283,6 @@ void *thread_function(void *thread_param) {
                 }
                 //We can close the main file pointer and release the mutex lock
                 close(log_fd);
-                //@TODO Unlock Mutex
                 pthread_mutex_unlock(threadData->log_file_mutex);
             }
         }
@@ -257,7 +305,7 @@ int main(int argc, char *argv[]) {
 
     openlog(NULL, 0, LOG_USER);
 
-    SLIST_HEAD(threadList, thread_node) threadListHead = SLIST_HEAD_INITIALIZER(threadListHead);
+
 
     // Parse command line arguments
     if (argc == 2 && strcmp(argv[1], "-d") == 0) {
@@ -277,6 +325,13 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Cannot setup SIGTERM!\n");
         return ERROR_RESULT;
     }
+
+    //Setup Sig Alarm Handler
+    if (signal(SIGALRM, alarm_handler) == SIG_ERR) {
+        fprintf(stderr, "Cannot setup SIGALARM!\n");
+        return ERROR_RESULT;
+    }
+
 
     //Remove the output file
     if (remove(OUTPUT_FILE) == 0) {
@@ -352,6 +407,9 @@ int main(int argc, char *argv[]) {
     pthread_mutex_init(&logFileMutex, NULL);
     printf("Currently listening for connections!\n");
 
+    //Setup an alarm
+    alarm(10);
+
 
     //Waits for connections
     while (1) {  // main accept() loop
@@ -405,7 +463,14 @@ int main(int argc, char *argv[]) {
         SLIST_FOREACH_SAFE(currentElement, &threadListHead, entries, tempElement) {
             //Check to see if the thread is completed
             if (currentElement->thread_params->thread_complete_success) {
-                printf("Cleanup of thread/node %d occuring",currentElement->thread_params->thread_num);
+                printf("Cleanup of thread/node %d occuring \r\n", currentElement->thread_params->thread_num);
+                //Remove the output file
+                char temp_file[256];
+                snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", currentElement->thread_params->thread_num);
+                if (remove(temp_file) == 0) {
+                    printf("File '%s' deleted successfully.\n", temp_file);
+                }
+
                 //Join the thread to cleanup its resources
                 pthread_join(currentElement->thread_id, NULL);
                 // Remove the element safely from the list.
