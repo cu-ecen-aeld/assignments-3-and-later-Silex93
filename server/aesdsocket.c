@@ -1,7 +1,7 @@
 /****************************************************************************
  *  Author:     Daniel Mendez
  *  Course:     ECEN 5823
- *  Project:    Assignment_5
+ *  Project:    Assignment_6
  *
  ****************************************************************************/
 
@@ -23,21 +23,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <syslog.h>
-#include <stdlib.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <stdbool.h>
-
+#include <time.h>
+#include <pthread.h>
+#include "queue.h"
 
 #define PORT "9000"
 #define BUFFER_SIZE 1024
@@ -45,12 +44,85 @@
 #define OUTPUT_FILE "/var/tmp/aesdsocketdata"
 #define ERROR_RESULT (-1)
 
-char * packet_buffer;
+pthread_mutex_t logFileMutex;
+int server_socket_fd;
+
+typedef struct thread_data {
+
+    int thread_num;
+    int client_socket;
+    pthread_mutex_t *log_file_mutex;
+    bool thread_complete_success;
+} thread_data_t;
+
+
+typedef struct thread_node {
+    pthread_t thread_id;
+    thread_data_t *thread_params;
+    SLIST_ENTRY(thread_node) entries;
+} thread_node_t;
+
+SLIST_HEAD(threadList, thread_node) threadListHead = SLIST_HEAD_INITIALIZER(threadListHead);
 
 static void signal_handler(int signo) {
-    printf("Signal Recieved %d \r\n",signo);
+    //Free the linked list
+
+    thread_node_t *currentElement, *tempElement;
+    SLIST_FOREACH_SAFE(currentElement, &threadListHead, entries, tempElement) {
+        //Remove the output file
+        char temp_file[256];
+        snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", currentElement->thread_params->thread_num);
+        if (remove(temp_file) == 0) {
+            printf("File '%s' deleted successfully.\n", temp_file);
+        }
+
+        //Join all running threads
+        //IDK if this should be pthread_cancel or pthread_join
+        pthread_join(currentElement->thread_id,NULL);
+        // Remove the element safely from the list.
+        SLIST_REMOVE(&threadListHead, currentElement, thread_node, entries);
+        //Free the thread param data
+        free(currentElement->thread_params);
+        //Free the node itself
+        free(currentElement);
+    }
+    //destroy the mutex
+    pthread_mutex_destroy(&logFileMutex);
+    //close the server socket
+    close(server_socket_fd);
+    printf("Signal Recieved %d \r\n", signo);
     syslog(LOG_DEBUG, "Caught signal, exiting");
     exit(EXIT_SUCCESS);
+}
+
+static void alarm_handler(int signo) {
+    printf("Alarm Recieved %d \r\n", signo);
+    char timestamp[64];
+    time_t currentTime;
+    struct tm *timeInfo;
+
+    //Get the current time
+    time(&currentTime);
+    timeInfo = localtime(&currentTime);
+    //Store the string formatted as RFC
+    strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %T %z\n", timeInfo);
+    //lock the mutex
+    pthread_mutex_lock(&logFileMutex);
+
+    //Then we open the main log file creating it if it doesn't exist
+    int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    //Write to the file
+    if (write(log_fd, timestamp, strlen(timestamp)) == -1) {
+        perror("Error writing to destination file");
+        close(log_fd);
+    }
+    //close the file
+    close(log_fd);
+    //Unlock the mutex
+    pthread_mutex_unlock(&logFileMutex);
+
+    //Schedule the next alarm
+    alarm(10);
 }
 
 // get sockaddr, IPv4 or IPv6:
@@ -105,14 +177,124 @@ void daemonize() {
         }
     }
 
-   
+
+}
+
+void *thread_function(void *thread_param) {
+
+    //Get the params
+    thread_data_t *threadData = (thread_data_t *) thread_param;
+    int client_socket = threadData->client_socket;
+    ssize_t bytes_received;
+    char recv_buffer[BUFFER_SIZE];
+
+    //Setup the temp file name
+    char temp_file[256];
+    snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", threadData->thread_num);
+    printf("Thread %d waiting on data!  \r\n", threadData->thread_num);
+
+    //Waits for data
+    while (1) {
+        bytes_received = recv(client_socket, recv_buffer, BUFFER_SIZE, 0);
+        if (bytes_received == -1) {
+            perror("recv");
+            close(client_socket);
+            break;
+        } else if (bytes_received == 0) {
+            // Connection closed by the client
+            syslog(LOG_INFO, "Closed connection from thread %d \r\n", threadData->thread_num);
+            printf("Connection closed \r\n");
+            close(client_socket);
+            break;
+        }
+        //Iterate through the bytes received and add them to the recv_buffer to write to the file
+        for (int i = 0; i < bytes_received; i++) {
+            //Open the temporary file, creating it if needed
+
+            char new_char = recv_buffer[i];
+            //If new_char is not a newline then just add it in to the temp file
+            if (new_char != '\n') {
+                int temp_fd = open(temp_file, O_CREAT | O_WRONLY | O_APPEND, 0644);
+                //Check temp file return code
+                if (temp_fd == -1) {
+                    perror("Error opening temporary file for writing");
+                    exit(EXIT_FAILURE);
+                }
+                write(temp_fd, &new_char, sizeof(char));
+                //Then close the fd
+                close(temp_fd);
+            } else {
+                //Open it in Read and Writing mode
+                int temp_fd = open(temp_file, O_RDWR);
+                //Check temp file return code
+                if (temp_fd == -1) {
+                    perror("Error opening temporary file for copying");
+                    exit(EXIT_FAILURE);
+                }
+                //Init Temp buffer for copying over data
+                char temp_file_buffer[BUFFER_SIZE];
+
+                ssize_t bytesRead;
+                //Else we close off this packet by dumping to our main file
+                //Here we first lock the mutex
+
+                pthread_mutex_lock(threadData->log_file_mutex);
+                //Then we open the main file creating it if it doesn't exist
+                int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                //Keep copying over from temp file to main file
+                while ((bytesRead = read(temp_fd, temp_file_buffer, BUFFER_SIZE)) > 0) {
+                    if (write(log_fd, temp_file_buffer, bytesRead) == -1) {
+                        perror("Error writing to destination file");
+                        close(temp_fd);
+                        close(log_fd);
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                //THen just write the \n and \0 to terminate
+                char *line_terminator = "\n";
+                if (write(log_fd, line_terminator, 1) == -1) {
+                    perror("Error writing line terminator");
+                    close(temp_fd);
+                    close(log_fd);
+                    exit(EXIT_FAILURE);
+                }
+
+
+                //Then just empty the temporary file
+                if (ftruncate(temp_fd, 0) == -1) {
+                    perror("Error truncating file");
+                    close(temp_fd); // Close the file descriptor on error
+                    exit(EXIT_FAILURE);
+                }
+                //No need for the temp file now so close the fd
+                close(temp_fd);
+                //Now we have to read the entire log file and print the output to the user
+                //Close the current reading mode
+                close(log_fd);
+                //Open it for reading only
+                log_fd = open(OUTPUT_FILE, O_RDONLY);
+                //Keep reading  from log file and return over the socket
+                while ((bytesRead = read(log_fd, temp_file_buffer, BUFFER_SIZE)) > 0) {
+                    //We return the read bytes to the user over the socket
+                    //Send the file contents back to the parent
+                    if (send(client_socket, temp_file_buffer, bytesRead, 0) == -1) {
+                        perror("Failed to send file data back over the socket");
+                    }
+                }
+                //We can close the main file pointer and release the mutex lock
+                close(log_fd);
+                pthread_mutex_unlock(threadData->log_file_mutex);
+            }
+        }
+    }
+    close(client_socket);  // No need for client socket anymore
+    threadData->thread_complete_success = true;
+    return (void *) threadData;
 }
 
 int main(int argc, char *argv[]) {
-
-
-
-    int socket_fd, client_socket;
+    int thread_count = 0;
+    int client_socket;
     struct addrinfo hints, *address_results, *nodes;
     char s[INET6_ADDRSTRLEN];
     struct sockaddr_storage their_addr;
@@ -123,12 +305,13 @@ int main(int argc, char *argv[]) {
 
     openlog(NULL, 0, LOG_USER);
 
+
+
     // Parse command line arguments
     if (argc == 2 && strcmp(argv[1], "-d") == 0) {
         daemon_mode = true;
         printf("Daemon Mode enabled \r\n");
     }
-
 
     //Set up SIG INT handler
     if (signal(SIGINT, signal_handler) == SIG_ERR) {
@@ -142,6 +325,13 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Cannot setup SIGTERM!\n");
         return ERROR_RESULT;
     }
+
+    //Setup Sig Alarm Handler
+    if (signal(SIGALRM, alarm_handler) == SIG_ERR) {
+        fprintf(stderr, "Cannot setup SIGALARM!\n");
+        return ERROR_RESULT;
+    }
+
 
     //Remove the output file
     if (remove(OUTPUT_FILE) == 0) {
@@ -165,20 +355,20 @@ int main(int argc, char *argv[]) {
     }
     //Iterate through and bind
     for (nodes = address_results; nodes != NULL; nodes = nodes->ai_next) {
-        if ((socket_fd = socket(nodes->ai_family, nodes->ai_socktype,
-                                nodes->ai_protocol)) == -1) {
+        if ((server_socket_fd = socket(nodes->ai_family, nodes->ai_socktype,
+                                       nodes->ai_protocol)) == -1) {
             perror("server: socket");
             continue;
         }
 
-        if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &yes,
+        if (setsockopt(server_socket_fd, SOL_SOCKET, SO_REUSEADDR, &yes,
                        sizeof(int)) == -1) {
             perror("setsockopt");
             exit(1);
         }
 
-        if (bind(socket_fd, nodes->ai_addr, nodes->ai_addrlen) == -1) {
-            close(socket_fd);
+        if (bind(server_socket_fd, nodes->ai_addr, nodes->ai_addrlen) == -1) {
+            close(server_socket_fd);
             perror("server: bind");
             continue;
         }
@@ -193,13 +383,14 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "server: failed to bind\n");
         return ERROR_RESULT;
     }
-	//since bind was successful now lets start as a daemon
-	if(daemon_mode){
-		daemonize();
-	}
+
+    //since bind was successful now lets start as a daemon
+    if (daemon_mode) {
+        daemonize();
+    }
 
     //Start listening using socket
-    if (listen(socket_fd, BACKLOG) == -1) {
+    if (listen(server_socket_fd, BACKLOG) == -1) {
         perror("failed to listen to connection");
         return ERROR_RESULT;
     }
@@ -211,11 +402,19 @@ int main(int argc, char *argv[]) {
 //        perror("sigaction");
 //        exit(1);
 //    }
+
+    //Initalize the mutex for the logfile
+    pthread_mutex_init(&logFileMutex, NULL);
     printf("Currently listening for connections!\n");
 
+    //Setup an alarm
+    alarm(10);
+
+
+    //Waits for connections
     while (1) {  // main accept() loop
         sin_size = sizeof their_addr;
-        client_socket = accept(socket_fd, (struct sockaddr *) &their_addr, &sin_size);
+        client_socket = accept(server_socket_fd, (struct sockaddr *) &their_addr, &sin_size);
         if (client_socket == -1) {
             perror("accept");
             continue;
@@ -228,125 +427,64 @@ int main(int argc, char *argv[]) {
         syslog(LOG_INFO, "Accepted connection from %s \r\n", s);
 
 
-        
-        bool end_of_packet = false;
-        uint32_t packet_buffer_pos = 0;
+
+        //Create the parameters needed by the thread
+        thread_data_t *threadData = (thread_data_t *) malloc(sizeof(thread_data_t));
+
+//        if(threadData == NULL){
+//            ERROR_LOG("Failed to allocate memory for thread paramaters");
+//            return false;
+//
+//        }
+        //    DEBUG_LOG("Thread param allocation success!");
+
+        //Setup threadData
+        threadData->client_socket = client_socket;
+        threadData->thread_num = thread_count++;
+        threadData->log_file_mutex = &logFileMutex;
+        threadData->thread_complete_success = false;
+
+        //Now we create a new node
+        thread_node_t *new_node = malloc(sizeof(thread_node_t));
+
+        //Set a pointer to the thread params within the node
+        new_node->thread_params = threadData;
+
+        //Create the new thread to handle the connection
+        rc = pthread_create(&new_node->thread_id, NULL, thread_function, (void *) threadData);
+
+        //Now put the node into our linked list
+        SLIST_INSERT_HEAD(&threadListHead, new_node, entries);
 
 
-        char buffer[BUFFER_SIZE*20];
-
-        ssize_t bytes_received;
-
-        //Allocate for the packet buffer
-        packet_buffer = (char *) malloc(BUFFER_SIZE*20);
-
-        while (1) {
-            bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
-            end_of_packet = false;
-            if (bytes_received == -1) {
-                perror("recv");
-                close(client_socket);
-                break;
-            } else if (bytes_received == 0) {
-                // Connection closed by the client
-                syslog(LOG_INFO, "Closed connection from %s \r\n", s);
-                printf("Connection closed \r\n");
-                close(client_socket);
-                break;
-            }
-            //Iterate through the bytes received and add them to the buffer to write to the file
-            for (int i = 0; i < bytes_received; i++) {
-                packet_buffer[packet_buffer_pos++] = buffer[i];
-                //Keep appending bytes till a newline is seen
-                if (buffer[i] == '\n') {
-                    packet_buffer[packet_buffer_pos] = '\0';
-                    packet_buffer_pos = 0;
-                    end_of_packet = true;
-                    break;
+        //Check all threads to see if any are complete
+        // Traverse the list and remove elements safely using SLIST_FOREACH_SAFE.
+        thread_node_t *currentElement, *tempElement;
+        SLIST_FOREACH_SAFE(currentElement, &threadListHead, entries, tempElement) {
+            //Check to see if the thread is completed
+            if (currentElement->thread_params->thread_complete_success) {
+                printf("Cleanup of thread/node %d occuring \r\n", currentElement->thread_params->thread_num);
+                //Remove the output file
+                char temp_file[256];
+                snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", currentElement->thread_params->thread_num);
+                if (remove(temp_file) == 0) {
+                    printf("File '%s' deleted successfully.\n", temp_file);
                 }
 
+                //Join the thread to cleanup its resources
+                pthread_join(currentElement->thread_id, NULL);
+                // Remove the element safely from the list.
+                SLIST_REMOVE(&threadListHead, currentElement, thread_node, entries);
+                //Free the thread param data
+                free(currentElement->thread_params);
+                //Free the node itself
+                free(currentElement);
+
             }
-
-            if (end_of_packet) {
-                //Echo the packet serverside just to make sure
-                printf("Incoming packet contained %s", packet_buffer);
-
-                //Create the output file if it doesn't exist
-                int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
-
-                //Append the contents of the packet to the file
-                ssize_t bytes_written = write(log_fd, packet_buffer, strlen(packet_buffer));
-                if (bytes_written == -1) {
-                    perror("child process failed to write to file");
-					free(packet_buffer);
-                    close(log_fd);
-                    return 1; // Return an error code
-                }
-                close(log_fd);
-                // Check if a packet has finish being received and then send back the contents of the file
-                if (!fork()) {
-                    FILE *file;
-                    char *tmp_buffer;
-                    size_t file_size;
-
-                    //Child Process doesn't need server socket
-                    close(socket_fd);
-
-                    file = fopen(OUTPUT_FILE, "rb");
-                    if (file == NULL) {
-                        perror("writer process unable to open file");
-                        exit(EXIT_FAILURE);
-                    }
-
-
-                    // Get the file size
-                    fseek(file, 0, SEEK_END);
-                    file_size = ftell(file);
-                    rewind(file);// Move the pointer back to the start
-                    //Malloc memory to read the current file contents
-
-                    // Allocate memory for the file contents
-                    tmp_buffer = (char *) malloc(file_size);
-                    if (tmp_buffer == NULL) {
-                        perror("writer process failed to malloc");
-                        fclose(file);
-                        exit(EXIT_FAILURE);
-                    }
-
-                    // Read the entire file into the buffer
-                    size_t bytes_read = fread(tmp_buffer, 1, file_size, file);
-                    if (bytes_read != file_size) {
-                        perror("child process failed to read file into memory");
-                        fclose(file);
-                        free(tmp_buffer);
-                        exit(EXIT_FAILURE);
-                    }
-                    //Close the file
-                    fclose(file);
-
-                    //Send the file contents back to the parent
-                    if (send(client_socket, tmp_buffer, file_size, 0) == -1) {
-                        perror("child process failed to send file");
-                    }
-					free(tmp_buffer);
-                    close(client_socket);
-                    
-
-                    exit(0);
-
-
-
-                }
-            }
-					
-
         }
-		
-		free(packet_buffer);
-        close(client_socket);  // No need for client socket anymore
-       // return 0;
     }
-	
+
     return 0;
 
 }
+

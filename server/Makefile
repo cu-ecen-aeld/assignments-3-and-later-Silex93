@@ -1,9 +1,11 @@
-#Daniel Mendez
-#ECEN 5713
-#Assignment 5
+# Daniel Mendez
+# ECEN 5713
+# Assignment 5
 
-CC = $(CROSS_COMPILE)gcc
-CFLAGS = -Wall -Wextra -g #Usually we do this for all assignments
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Wextra -g
+INCLUDES ?= -I./include  
+LDFLAGS ?= -pthread -lrt
 
 OUTPUT = aesdsocket
 
@@ -14,7 +16,7 @@ OBJS = $(SOURCES:.c=.o)
 all: $(OUTPUT)
 
 $(OUTPUT): $(OBJS)
-	$(CC) $(CFLAGS) -o $(OUTPUT) $(OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $(OUTPUT) $(OBJS) $(LDFLAGS)
 
 clean:
 	rm -f $(OUTPUT) $(OBJS)
