@@ -54,7 +54,9 @@ exactly what instruction was being called in our source code file. In this case 
 
 ```faulty_write+0x14/0x20 [faulty]```
 
-which is the name of the function which caused the error. If we check the faulty_write function at https://github.com/cu-ecen-aeld/assignment-7-Silex93/blob/134580cde97cbd7aba9552d39c76fd488e988a95/misc-modules/faulty.c#L49:L55
+which is the name of the function which caused the error. We could see it occured 0x14 bytes in to a function that was 0x20 bytes long in a function called faulty_write. Note we can also see this information
+at the top of the call trace which is useful for seeing the called functions leading up to the exception.
+If we check the faulty_write function at https://github.com/cu-ecen-aeld/assignment-7-Silex93/blob/134580cde97cbd7aba9552d39c76fd488e988a95/misc-modules/faulty.c#L49:L55
 we would see:
 
 ```
