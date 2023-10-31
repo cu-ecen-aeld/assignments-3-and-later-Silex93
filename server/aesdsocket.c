@@ -38,10 +38,19 @@
 #include <pthread.h>
 #include "queue.h"
 
+
+#define USE_AESD_CHAR_DEVICE 1
+
 #define PORT "9000"
 #define BUFFER_SIZE 1024
 #define BACKLOG 10   // how many pending connections queue will hold
-#define OUTPUT_FILE "/var/tmp/aesdsocketdata"
+
+#if USE_AESD_CHAR_DEVICE
+	#define OUTPUT_FILE "/dev/aesdchar"
+#else
+	#define OUTPUT_FILE "/var/tmp/aesdsocketdata"
+#endif
+
 #define ERROR_RESULT (-1)
 
 pthread_mutex_t logFileMutex;
@@ -66,7 +75,7 @@ SLIST_HEAD(threadList, thread_node) threadListHead = SLIST_HEAD_INITIALIZER(thre
 
 static void signal_handler(int signo) {
     //Free the linked list
-
+	syslog(LOG_DEBUG, "Caught signal in sign handler %d" ,signo);	
     thread_node_t *currentElement, *tempElement;
     SLIST_FOREACH_SAFE(currentElement, &threadListHead, entries, tempElement) {
         //Remove the output file
@@ -75,7 +84,7 @@ static void signal_handler(int signo) {
         if (remove(temp_file) == 0) {
             printf("File '%s' deleted successfully.\n", temp_file);
         }
-
+		syslog(LOG_DEBUG, "cleaned up files in handler");	
         //Join all running threads
         //IDK if this should be pthread_cancel or pthread_join
         pthread_join(currentElement->thread_id,NULL);
@@ -91,7 +100,7 @@ static void signal_handler(int signo) {
     //close the server socket
     close(server_socket_fd);
     printf("Signal Recieved %d \r\n", signo);
-    syslog(LOG_DEBUG, "Caught signal, exiting");
+    syslog(LOG_DEBUG, "closed socket and exiting now");
     exit(EXIT_SUCCESS);
 }
 
@@ -214,7 +223,7 @@ void *thread_function(void *thread_param) {
             char new_char = recv_buffer[i];
             //If new_char is not a newline then just add it in to the temp file
             if (new_char != '\n') {
-                int temp_fd = open(temp_file, O_CREAT | O_WRONLY | O_APPEND, 0644);
+                int temp_fd = open(temp_file, O_CREAT | O_WRONLY | O_APPEND, 0666);
                 //Check temp file return code
                 if (temp_fd == -1) {
                     perror("Error opening temporary file for writing");
@@ -225,7 +234,7 @@ void *thread_function(void *thread_param) {
                 close(temp_fd);
             } else {
                 //Open it in Read and Writing mode
-                int temp_fd = open(temp_file, O_RDWR);
+                int temp_fd = open(temp_file, O_CREAT|O_RDWR,0666);
                 //Check temp file return code
                 if (temp_fd == -1) {
                     perror("Error opening temporary file for copying");
@@ -332,11 +341,12 @@ int main(int argc, char *argv[]) {
         return ERROR_RESULT;
     }
 
-
+	#if !USE_AESD_CHAR_DEVICE
     //Remove the output file
     if (remove(OUTPUT_FILE) == 0) {
         printf("File '%s' deleted successfully.\n", OUTPUT_FILE);
     }
+	#endif
 
 
 
@@ -408,8 +418,9 @@ int main(int argc, char *argv[]) {
     printf("Currently listening for connections!\n");
 
     //Setup an alarm
-    alarm(10);
-
+	#if !USE_AESD_CHAR_DEVICE
+		alarm(10);
+	#endif
 
     //Waits for connections
     while (1) {  // main accept() loop
