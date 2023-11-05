@@ -1,7 +1,7 @@
 /****************************************************************************
  *  Author:     Daniel Mendez
  *  Course:     ECEN 5823
- *  Project:    Assignment_6
+ *  Project:    Assignment_9
  *
  ****************************************************************************/
 
@@ -17,8 +17,8 @@
  *
 
  *
- * @date        27 Sep 2023
- * @version     1.0
+ * @date        1 Nov 2023
+ * @version     2.0
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +36,9 @@
 #include <stdbool.h>
 #include <time.h>
 #include <pthread.h>
+#include <regex.h>
 #include "queue.h"
+#include "aesd_ioctl.h"
 
 
 #define USE_AESD_CHAR_DEVICE 1
@@ -143,6 +145,61 @@ void *get_in_addr(struct sockaddr *sa) {
     return &(((struct sockaddr_in6 *) sa)->sin6_addr);
 }
 
+bool check_for_ioctl_cmd(char * temp_file,uint32_t *cmd_num,uint32_t *cmd_offset){
+        char pattern[] = "(AESDCHAR_IOCSEEKTO:)([0-9]+),([0-9]+)";
+	char cmd_num_str[100];
+	char cmd_offset_str[100];
+	regex_t regex;
+	regmatch_t matches[4];
+	bool result;
+	
+	// Compile the regular expression
+    int reti = regcomp(&regex, pattern, REG_EXTENDED);
+    if (reti) {
+        fprintf(stderr, "Regex compilation failed\n");
+		exit(EXIT_FAILURE);
+    }
+	
+	//Since the fd is open we simply read the file into memory;
+	char temp_buffer[BUFFER_SIZE];
+	int temp_fd = open(temp_file, O_CREAT|O_RDWR,0666);
+	//Read in the entire file as much as the buffer can hold
+	size_t num_bytes = read(temp_fd, temp_buffer, BUFFER_SIZE);
+	//Insert a null char
+	temp_buffer[num_bytes] = '\0';
+	//Execute the regex
+	int match_result = regexec(&regex, temp_buffer, 4, matches, 0);
+	
+	if(match_result != 0){
+		result = false;
+	}
+	else{
+		//We have a match in the template so extract the numbers
+		int start1 = matches[2].rm_so;
+        int end1 = matches[2].rm_eo;
+        strncpy(cmd_num_str, temp_buffer + start1, end1 - start1);
+        cmd_num_str[end1 - start1] = '\0';
+
+        int start2 = matches[3].rm_so;
+        int end2 = matches[3].rm_eo;
+        strncpy(cmd_offset_str, temp_buffer + start2, end2 - start2);
+        cmd_offset_str[end2 - start2] = '\0';
+
+        // Convert the captured number strings to uint32_t
+        *cmd_num = (uint32_t)strtoul(cmd_num_str, NULL, 10);
+        *cmd_offset = (uint32_t)strtoul(cmd_offset_str, NULL, 10);
+		
+		result = true;
+	}
+	
+	//Close the fd
+	close(temp_fd);
+	return result;
+}
+
+
+
+
 
 void daemonize() {
     // Fork off the parent process
@@ -196,12 +253,14 @@ void *thread_function(void *thread_param) {
     int client_socket = threadData->client_socket;
     ssize_t bytes_received;
     char recv_buffer[BUFFER_SIZE];
-
+	ssize_t bytesRead;
     //Setup the temp file name
     char temp_file[256];
+	//Temp buffer for copying over data
+	char temp_file_buffer[BUFFER_SIZE];
     snprintf(temp_file, sizeof(temp_file), "/var/tmp/tempfile_%d.txt", threadData->thread_num);
     printf("Thread %d waiting on data!  \r\n", threadData->thread_num);
-
+	int log_fd; 
     //Waits for data
     while (1) {
         bytes_received = recv(client_socket, recv_buffer, BUFFER_SIZE, 0);
@@ -218,8 +277,7 @@ void *thread_function(void *thread_param) {
         }
         //Iterate through the bytes received and add them to the recv_buffer to write to the file
         for (int i = 0; i < bytes_received; i++) {
-            //Open the temporary file, creating it if needed
-
+			
             char new_char = recv_buffer[i];
             //If new_char is not a newline then just add it in to the temp file
             if (new_char != '\n') {
@@ -233,6 +291,40 @@ void *thread_function(void *thread_param) {
                 //Then close the fd
                 close(temp_fd);
             } else {
+			
+				struct aesd_seekto seek_params;
+				//We check the current temp file to see if the string matches our command
+				bool ioctl_called = check_for_ioctl_cmd(temp_file,&(seek_params.write_cmd),&(seek_params.write_cmd_offset));
+				if(ioctl_called){
+					
+					int temp_fd = open(temp_file, O_CREAT|O_RDWR,0666);
+					//We just empty the log file and continue since we don't write
+					if (ftruncate(temp_fd, 0) == -1) {
+					perror("Error truncating file");
+					close(temp_fd); // Close the file descriptor
+				}
+					//Now we perform the ioctl cmd
+					printf("Performing ioctl_cmd with cmd_offsed %d and write_cmd_offset of %d \r\n",seek_params.write_cmd,seek_params.write_cmd_offset);
+					//Do the ioctly seek
+					
+					 // Open the device or driver (replace with the appropriate file path)
+					log_fd = open(OUTPUT_FILE, O_RDWR);
+					if (log_fd == -1) {
+						perror("Failed to open device");
+						continue;
+					}
+
+					if (ioctl(log_fd, AESDCHAR_IOCSEEKTO, &seek_params) == -1) {
+						perror("IOCTL operation failed");
+					}
+					//Close temp file descriptor
+					//close(ioctl_fd);
+					close(temp_fd);
+
+					
+				}
+				//Only append to log file if ioctl command not called
+				else{
                 //Open it in Read and Writing mode
                 int temp_fd = open(temp_file, O_CREAT|O_RDWR,0666);
                 //Check temp file return code
@@ -240,16 +332,15 @@ void *thread_function(void *thread_param) {
                     perror("Error opening temporary file for copying");
                     exit(EXIT_FAILURE);
                 }
-                //Init Temp buffer for copying over data
-                char temp_file_buffer[BUFFER_SIZE];
-
-                ssize_t bytesRead;
+                              
+				
+			
                 //Else we close off this packet by dumping to our main file
                 //Here we first lock the mutex
 
                 pthread_mutex_lock(threadData->log_file_mutex);
                 //Then we open the main file creating it if it doesn't exist
-                int log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                log_fd = open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
                 //Keep copying over from temp file to main file
                 while ((bytesRead = read(temp_fd, temp_file_buffer, BUFFER_SIZE)) > 0) {
                     if (write(log_fd, temp_file_buffer, bytesRead) == -1) {
@@ -280,8 +371,11 @@ void *thread_function(void *thread_param) {
                 //Now we have to read the entire log file and print the output to the user
                 //Close the current reading mode
                 close(log_fd);
-                //Open it for reading only
-                log_fd = open(OUTPUT_FILE, O_RDONLY);
+                    //Open it for reading only
+                    log_fd = open(OUTPUT_FILE, O_RDONLY);
+
+			}
+
                 //Keep reading  from log file and return over the socket
                 while ((bytesRead = read(log_fd, temp_file_buffer, BUFFER_SIZE)) > 0) {
                     //We return the read bytes to the user over the socket
