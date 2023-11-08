@@ -36,8 +36,6 @@ MODULE_AUTHOR("Daniel Mendez");
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
-char * temp_buffer = NULL;
-size_t temp_buffer_size = 0;
 
 int aesd_open(struct inode *inode, struct file *filp)
 {
@@ -119,11 +117,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 	//Get the aesd device structure
 	struct aesd_dev *dev = filp->private_data;
 	//First check to see if there is a partial command ongoing
-	//Lock the mutex
-	res = mutex_lock_interruptible(&(dev->lock));
-	if(res){
-		return -ERESTARTSYS;
-	}
+	
 	//Allocate for the incoming data
 	char * new_data = (char *)kmalloc(count,GFP_KERNEL);
 	if(new_data == NULL){
@@ -134,17 +128,24 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 	//Copy over the user data to the newly allocated memory
 	res =  copy_from_user(new_data,buf,count);
 	
+	
+	//Lock the mutex
+	res = mutex_lock_interruptible(&(dev->lock));
+	if(res){
+		return -ERESTARTSYS;
+	}
+	
 	//Iterate until we scanned everything inside
 	while(bytes_scanned <= (count - 1)){
 		//We realloc to add a byte and increase the size by one
-		temp_buffer = krealloc(temp_buffer,++temp_buffer_size,GFP_KERNEL);
+		dev->temp_buffer = krealloc(dev->temp_buffer,++dev->temp_buffer_size,GFP_KERNEL);
 		//Check if allocation successful
-		if(!temp_buffer){
+		if(!dev->temp_buffer){
 			retval = -ENOMEM;
 			goto exit;
 		}
 		//Store the current character at the end of the temp buffer
-		temp_buffer[temp_buffer_size-1] = new_data[bytes_scanned];
+		dev->temp_buffer[dev->temp_buffer_size-1] = new_data[bytes_scanned];
 		
 		
 		//Check to see if the new character added was a newline
@@ -154,10 +155,10 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 			//We first allocate a buffer for the current size of the temp buffer
 			//We allocate for the new entry
 			struct aesd_buffer_entry new_entry;
-			new_entry.buffptr = (char *)kmalloc(temp_buffer_size,GFP_KERNEL);
-			new_entry.size = temp_buffer_size;
+			new_entry.buffptr = (char *)kmalloc(dev->temp_buffer_size,GFP_KERNEL);
+			new_entry.size = dev->temp_buffer_size;
 			//Now copy over the data
-			memcpy(new_entry.buffptr,temp_buffer,temp_buffer_size);
+			memcpy(new_entry.buffptr,dev->temp_buffer,dev->temp_buffer_size);
 			
 	
 			//First check if the circular buffer is full, then deallocate the current location
@@ -172,8 +173,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 			aesd_circular_buffer_add_entry(&(dev->circular_buffer),&new_entry);
 			
 			//After inserting we can reallocate the temporary buffer to be zero and set the size to be zero
-			temp_buffer = krealloc(temp_buffer,0,GFP_KERNEL);
-			temp_buffer_size = 0;
+			dev->temp_buffer = krealloc(dev->temp_buffer,0,GFP_KERNEL);
+			dev->temp_buffer_size = 0;
 			
 		}
 		//Increase the characters scanned by one
@@ -368,7 +369,10 @@ int aesd_init_module(void)
 	aesd_circular_buffer_init(&aesd_device.circular_buffer); // Probably not necessary since already set to zero?
 	
 	//Alloate memory for the temporary entry buffer
-	temp_buffer = (char *)kmalloc(TEMP_BUFFER_SIZE,GFP_KERNEL);
+	aesd_device.temp_buffer = (char *)kmalloc(TEMP_BUFFER_SIZE,GFP_KERNEL);
+	
+	//Set the size to zero
+	aesd_device.temp_buffer_size = 0;
 	
 	
     result = aesd_setup_cdev(&aesd_device);
@@ -391,8 +395,8 @@ void aesd_cleanup_module(void)
 
 	
 	//Free the temp pointer
-	if(temp_buffer)
-		kfree(temp_buffer);
+	if(aesd_device.temp_buffer)
+		kfree(aesd_device.temp_buffer);
 	
 	//Free all allocated memory in the circular buffer
 	AESD_CIRCULAR_BUFFER_FOREACH(entryptr,&aesd_device.circular_buffer,index){
