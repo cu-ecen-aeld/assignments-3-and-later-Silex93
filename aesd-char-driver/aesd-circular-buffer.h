@@ -18,6 +18,7 @@
 
 #define AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED 10
 
+uint8_t increment_pointer(uint8_t pos);
 struct aesd_buffer_entry
 {
     /**

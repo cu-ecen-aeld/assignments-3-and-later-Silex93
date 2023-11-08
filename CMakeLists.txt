@@ -23,9 +23,10 @@ add_subdirectory(assignment-autotest)
 ## Add an executable for assignment 2 tests
 #set(AESDSOCKET_SOURCES
 #        server/aesdsocket.c
+#        server/aesd_ioctl.h
 #        server/queue.h
 #)
-#
+
 #add_executable(aesdsocket ${AESDSOCKET_SOURCES})
 #
 #set(CIRCULAR_BUFFER_SOURCES
